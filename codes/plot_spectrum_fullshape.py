@@ -1,0 +1,116 @@
+#Code that plots the fullshape reconstruction fit to the data, including the best fit 
+#solution and the deduced transmission function
+
+###################################################################
+#Import modules
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+import cPickle
+from scipy.io import readsav
+import numpy as np
+import re
+import os
+import linecache
+import sys
+###################################################################
+if len(sys.argv)<3:
+	print 'An input file and setup file are needed as arguments'
+	print 'Input file path must be entered before setup file path'
+	print 'Example: python run_fullshape_fitter.py /path/to/input_file.txt /path/to/setup_file.txt'
+	sys.exit(0)
+
+input_file=sys.argv[1]
+setup_file=sys.argv[2]
+
+if not os.path.isfile(input_file) or not os.path.isfile(setup_file):
+	print 'Your input file or setup file does not exist. Please provide a valid file path.'
+	sys.exit(0)
+
+directory=str(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,10)).group(1))
+datadir=directory+'data/'
+savedir=directory+'saved_data/'
+imagedir=directory+'images/'
+
+num_gals=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,2)).group(1))
+
+#Load in SSP models used for reconstruction
+models=readsav(datadir+'spectra_hist_m10_chabrier.sav') #Load in idl models
+ssps=models['new_spectra']                              # Pull out SSP datacube
+wave=models['wave']					#SSP wave vector
+
+newspectra=cPickle.load(
+	open(datadir+'M10_datacube_Chabrier_4ages_3metals.pkl','rb')
+	)
+
+for index in range(num_gals):
+	name_file=np.loadtxt(input_file,unpack=True,skiprows=11,dtype=str)[index]
+	name_folder=os.path.splitext(name_file)[0]+'/'
+	###################################################################
+	#Load in data from fullshape fit for plotting
+	#If known, load in perfect input spectrum 
+	wave_input,spectrum_input=np.loadtxt(savedir+name_folder+'perfect_spectrum'+name_folder[:-1]+'.out')
+	
+	#Load in dusty, noisy input spectrum
+	wave_input,spectrum_input_dusty,sigma=np.loadtxt(savedir+name_folder+'noisy_dusty_spectrum'+name_folder[:-1]+'.out')
+
+	#Load in full sampler chain solutions for each of the walkers (log space)
+	sampler_chain=cPickle.load(open(savedir+name_folder+'sampler_chain_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','rb'))
+
+	#Load in the log likelihood
+	log_liklihoods=cPickle.load(open(savedir+name_folder+'sampler_logliklihoods_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','rb'))
+
+	#Calculate the positions fo the best fit parameters
+	index_max_liklihood=np.unravel_index(log_liklihoods.argmax(),log_liklihoods.shape)
+
+	#Load in the factors needed to calculate the galaxie's mass
+	factor=cPickle.load(open(savedir+name_folder+'logfactor_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','rb'))
+	factor_2=cPickle.load(open(savedir+name_folder+'logfactor_2_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','rb'))
+
+	#Find the best fit parameters from the bayesian solution (real space)
+	best_fit_params=np.exp(sampler_chain[index_max_liklihood[0],index_max_liklihood[1],1:])*factor
+
+	#Save the best fit parameters for the fullshape reconstruction (real space)
+	f=open(savedir+name_folder+'best_fit_params_'+name_folder[:-1]+'.pkl','wb')
+	cPickle.dump(best_fit_params,f)
+	f.close()
+	
+	#Save the star formation history of the fullshape output (MSun p bin)
+	np.savetxt(savedir+name_folder+'SFH_output'+name_folder[:-1]+'_fullshape.out',best_fit_params)
+
+	###################################################################
+	#Calculate the best fit spectrum for plotting
+	best_fit_spectrum=np.dot(best_fit_params,newspectra)
+	
+	#Normalise the best fit spectrum to be an SED
+	best_fit_spectrum=best_fit_spectrum*factor_2
+	
+	###################################################################
+	#Plot fullshape solution to the spectrum 
+	plt.figure(figsize=(8,12))
+	ax1=plt.subplot(311)
+	ax1.plot(wave_input,spectrum_input,'g',label='No Dust')
+	ax1.plot(wave_input,spectrum_input_dusty,'r',label=r'Dust & Noise')
+	ax1.plot(wave,best_fit_spectrum, color='k',label='Best Fit Fullshape')
+	# plot the new best fit line
+	ax1.set_ylabel('Flux (Arbitrary Scale)')
+	plt.title(name_folder[:-1])
+	plt.legend(loc='best')
+	plt.setp(ax1.get_xticklabels(),visible=False)
+	
+	#Plot the ratio between the perfect input spectrum and the the solution that the
+	#fullshape method recovered
+	ax2=plt.subplot(312,sharex=ax1)
+	ax2.plot(wave,best_fit_spectrum/spectrum_input)
+	ax2.set_ylabel('Ratio (Best fit/Perfect Input)')
+	plt.setp(ax2.get_xticklabels(),visible=False)
+	
+	#Plot the true transmission function
+	ax3=plt.subplot(313,sharex=ax2)
+	ax3.plot(wave,spectrum_input_dusty/best_fit_spectrum,label='Calculated Transmission')
+	ax3.plot(wave,spectrum_input_dusty/spectrum_input,label='True Transmission')
+	ax3.set_ylabel('Input/Best Fit Fullshape')
+	ax3.set_xlabel(r'Wavelength $\AA$')
+	ax3.legend(loc='best')
+	plt.savefig(imagedir+name_folder+'Spectrum_fullshape_recontruction_'+name_folder[:-1]+'.pdf')
+	plt.close()

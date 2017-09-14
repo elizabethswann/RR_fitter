@@ -1,0 +1,201 @@
+#Code to find the best fit bayesian solution to the standard
+#SSP fitting method, assuming a Calzetti dust model
+
+###################################################################
+#Import modules
+import numpy as np
+from scipy.io import readsav
+from numpy import random
+import emcee
+import sys
+import cPickle
+from astropy.cosmology import Planck13 as cosmology
+from astropy.io import fits
+from astropy import units as u
+import linecache
+import os
+import re
+import time
+###################################################################
+#Define MCMC liklihood function
+def lnlike(logtheta,model_arr,x,y,y_err):
+	ebv=logtheta[0]
+	theta=np.exp(logtheta[1:])
+	test_spectra=np.dot(theta,model_arr)
+	dusted_spectra=frac_attenutation(x,ebv)*test_spectra
+	return np.sum(-(((y-dusted_spectra)**2.)/(2.*y_err**2.)))
+
+#Do not allow the fractional contribution for each parameter get too small
+#(ie, log(-20)~=log(-100))~=0.
+def lnprior(logtheta):
+	if np.any(logtheta<-20.):
+		return -np.inf
+	else:
+		return 0.0
+
+def lnprob(logtheta,model_arr,x,y,yerr):
+	lp=lnprior(logtheta)
+	if not np.isfinite(lp):
+		return -np.inf
+	return lp+lnlike(logtheta,model_arr,x,y,yerr)
+
+###################################################################
+#Load in input parameters from input file
+if len(sys.argv)<3:
+	print 'An input file and setup file are needed as arguments'
+	print 'Input file path must be entered before setup file path'
+	print 'Example: python run_fullshape_fitter.py /path/to/input_file.txt /path/to/setup_file.txt'
+	sys.exit(0)
+
+input_file=sys.argv[1]
+setup_file=sys.argv[2]
+
+if not os.path.isfile(input_file) or not os.path.isfile(setup_file):
+	print 'Your input file or setup file does not exist. Please provide a valid file path.'
+	sys.exit(0)
+
+directory=str(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,10)).group(1))
+datadir=directory+'data/'
+savedir=directory+'saved_data/'
+
+num_gals=boxSize=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,2)).group(1))
+
+#Load in SSP models used for reconstruction
+models=readsav(datadir+'spectra_hist_m10_chabrier.sav') #Load in idl models
+ssps=models['new_spectra']                              # Pull out SSP datacube
+wave=models['wave']					#SSP wave vector
+
+norm_models=models['models_norm']
+
+newspectra=cPickle.load(
+	open(datadir+'M10_datacube_Chabrier_4ages_3metals.pkl','rb')
+	)
+
+ndim=len(newspectra)+1
+
+print 'Running fullshape fitter on',num_gals,'galaxies.'
+print '------------------------------------------------------------------------'
+
+###################################################################
+for index in range(num_gals):
+	start_time=time.clock()
+	name_file=np.loadtxt(input_file,unpack=True,skiprows=11,dtype=str)[index]
+	name_folder=os.path.splitext(name_file)[0]+'/'
+
+	boxSize=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(setup_file,1)).group(1))
+	datacube=str(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(setup_file,2)).group(1))
+
+	random_seed=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(setup_file,9)).group(1))
+	nwalkers_fullshape=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(setup_file,3)).group(1))
+	nsteps_fullshape=int(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(setup_file,5)).group(1))
+	survey=str(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,7)).group(1))
+
+	np.random.seed(random_seed)
+	print 'Reconstructing', name_file, 'with fullshape fitting method'
+	###################################################################
+	#Define Calzetti dust model (different over different wavelength ranges)
+
+	Es=0.44*0.3             	#Arbitrarily Choseon value of Es (typical value for most gals)
+	def k_lambda(lambda_wav):
+		if lambda_wav*(10.**-4.) <=0.63:
+			return (
+				2.659*(-2.156 + (1.509/(lambda_wav*1e-4)) 
+				- (0.198/((lambda_wav*1e-4)**2.)) 
+				+ (0.011/((lambda_wav*1e-4)**3.)))
+				+ 4.05
+				)
+		else:
+			return 2.659*(-1.857+(1.04/(lambda_wav*1.e-4))) + 4.05
+	
+	def frac_attenutation(lambda_wav,Es):
+		k_lambda_arr=np.zeros(len(lambda_wav))
+		for gamma in range(len(lambda_wav)):
+			k_lambda_arr[gamma]=k_lambda(lambda_wav[gamma])
+		return (10**(-0.4*Es*k_lambda_arr))
+	###################################################################
+	if survey in ['Lgal']:
+		#Load in redshift from Lgal simulations
+		inputdir=str(re.search(r"\'\s*(.*?)\s*\'",linecache.getline(input_file,11)).group(1))
+		head=fits.open(inputdir+name_file)[0]
+		redshift=float(head.header['Z'])
+	
+	elif survey not in ['Lgal','Fake']:
+		print 'Must choose a valid survey - Lgal or Fake'
+		sys.exit(0)
+
+	#Load in spectrum, both unattenuated and attenuated if survey = fake or Lgal
+	wave_input,spectrum_input=np.loadtxt(savedir+name_folder+'perfect_spectrum'+name_folder[:-1]+'.out')
+	
+	wave_input,spectrum_input_dusty,sigma=np.loadtxt(savedir+name_folder+'noisy_dusty_spectrum'+name_folder[:-1]+'.out')
+	
+	#Normalise the input spectrum to be ~1 and record the normalisation factor. This makes it
+	#easier for the bayesian fitter to find a solution
+	norm_input_spectrum=np.mean(spectrum_input_dusty)
+	spectrum_input_dusty=spectrum_input_dusty/norm_input_spectrum
+	#Normalise the errors by the same amount 
+	sigma=sigma/norm_input_spectrum
+	
+	#Calculate luminosity distance, needed to calculate mass
+	dist=cosmology.luminosity_distance(redshift)
+	dist=dist.to(u.meter)
+	
+	lumin_dist=4.*np.pi*(dist.value)**2.
+	
+	#Save factors needed to calculate the mass of the galaxy
+	factor=(norm_input_spectrum*lumin_dist)/norm_models
+	factor_2=norm_models/lumin_dist
+	
+	f=open(savedir+name_folder+'logfactor_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','wb')
+	cPickle.dump(factor,f)
+	f.close()
+	
+	f=open(savedir+name_folder+'logfactor_2_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','wb')
+	cPickle.dump(factor_2,f)
+	f.close()	
+	###################################################################
+	#Guess initial parameters (all equal and summing to one)
+	initial_guess=np.ones(ndim)
+	initial_guess[1:]=np.log(initial_guess[1:]/np.sum(initial_guess[1:]))
+	
+	###################################################################
+	#Perform the MCMC with a given number of walkers and steps to get better input parameters
+	#Number of dimensions, number of walkers
+	nwalkers_init=40
+	#Walker initial positions start in a ball of radius 1 in log space	
+	pos = [initial_guess + 1.*(2.*np.random.random(ndim)-1) for i in range(nwalkers_init)]
+	#Run the sampler for 100 steps
+	sampler = emcee.EnsembleSampler(nwalkers_init, ndim, lnprob, 
+		args=(newspectra,wave_input, spectrum_input_dusty,sigma))
+	sampler.run_mcmc(pos,100)
+	
+	#Calculate the best likelihood solution from the initial 100 steps.
+	log_liklihoods=sampler.lnprobability
+	index_max_liklihood=np.unravel_index(log_liklihoods.argmax(),log_liklihoods.shape)
+	best_fit_params=np.concatenate(
+		(np.array([(sampler.chain[index_max_liklihood[0],index_max_liklihood[1],0])]),
+		np.exp(sampler.chain[index_max_liklihood[0],index_max_liklihood[1],1:]))
+		)	
+	#Create new starting positions for the walkers in a ball about the best fit values
+	#from the first 100 steps, now with a ball radius of 0.1 in log space
+	new_pos=[initial_guess
+		+ 0.1*(2.*np.random.random(ndim)-1.) for i in range(nwalkers_fullshape)]
+	
+	###################################################################
+	#Perform the full MCMC for 1000 steps, with the new walker positions
+	sampler = emcee.EnsembleSampler(nwalkers_fullshape, ndim, lnprob,
+		args=(newspectra,wave_input, spectrum_input_dusty,sigma))
+	sampler.run_mcmc(new_pos,nsteps_fullshape)
+	print 'Fullshape fitter finished on galaxy', name_file, ',saving results.'
+	###################################################################
+	#Save the output of the MCMC run
+	#Save the log likelihoods for the entire chain
+	f=open(savedir+name_folder+'sampler_logliklihoods_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','wb')
+	cPickle.dump(sampler.lnprobability,f)
+	f.close()
+	
+	#Save the entire chain (positions of the walkers for each step in log space) 
+	f=open(savedir+name_folder+'sampler_chain_'+name_folder[:-1]+'_fullshape_correct_dust.pkl','wb')
+	cPickle.dump(sampler.chain,f)
+	f.close()
+	print 'That took',time.clock()-start_time,'seconds.'
+	print '------------------------------------------------------------------------'
