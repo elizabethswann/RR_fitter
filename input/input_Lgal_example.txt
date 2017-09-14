@@ -1,0 +1,14 @@
+#Input file for RR SSP method fit. Do not change ordering of lines, just modify the parts after the = sign!
+numGals='2'	#Number of galaxies you want to run in this go
+name_folder='/mnt/lustre/eswann/RRfitter/codes/'	#Name of folder code resides in
+add_dust='True'		#Calzetti dust will be added to input spectrum
+add_noise='True'	#Add white noise to the spectrum with given SNR
+SNR='25.'		#SNR of spectrum if add_noise=True
+survey='Lgal'	#name of survey, choose from Fake or Lgal
+input_arr=''	#path to input SFH file input_arr.out if survey=Fake, not needed for Lgalaxies
+plot='True'	#Make relevant plots for spectra (can always be done after run)
+directory='/mnt/lustre/eswann/RR_fitter/'	#Base directory for the code
+input_gal_dir='/mnt/lustre/eswann/RR_fitter/input/Lgal_input/'
+#Each line below contains name of files you want to run through
+gal_spectrum_750_MGS_M10.fits
+gal_spectrum_364_MGS_M10.fits
