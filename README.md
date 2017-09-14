@@ -51,5 +51,5 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ## Acknowledgments
 
-* This code uses the emcee python package, created by Dan Foreman-Mackey and contributors, and is free software made avaliable under the MIT license (https://github.com/dfm/emcee).
+* This code uses the emcee python package, created by Dan Foreman-Mackey and contributors, and is free software made avaliable under the MIT license (https://github.com/dfm/emcee). Note that this module is not listed as a prerequisite as it is contained as part of the RR_fitter in ```code/emcee``` and ```code/emcee_1``` as slight changes have been made for use with RR_fitter.
 * Thanks to Prof Peter Thomas and Dr Rita Tojeiro for all their contributions to this work.
